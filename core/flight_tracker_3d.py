@@ -17,9 +17,16 @@ from core.curvature_detector_3d import CurvatureDetector3D, CurvatureResult3D
 
 
 class FlightTracker3D:
-    def __init__(self, min_curvature_speed: float = 1.0, **kalman_kwargs):
+    def __init__(
+        self,
+        min_curvature_speed: float = 1.0,
+        min_curvature: float = 1e-4,
+        **kalman_kwargs,
+    ):
         self.filter = KalmanFilter3D(**kalman_kwargs)
-        self.curvature = CurvatureDetector3D(min_speed=min_curvature_speed)
+        self.curvature = CurvatureDetector3D(
+            min_speed=min_curvature_speed, min_curvature=min_curvature
+        )
 
     def update(self, x: float, y: float, z: float):
         est = self.filter.update((x, y, z))

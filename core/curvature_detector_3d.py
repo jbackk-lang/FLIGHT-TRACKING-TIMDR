@@ -44,6 +44,19 @@ SYNTETYCZNYCH (patrz data/generate_synthetic_flights.py), próg jest
 parametrem do skalibrowania na realnych logach lotu, gdy się pojawią --
 domyślna wartość (1.0 jednostki/krok) jest rozsądnym punktem startowym,
 nie zwalidowaną stałą.
+
+Druga, osobna poprawka (znaleziona później, przy okazji sprawdzania
+wariantu pseudokodu "THE_GEO_PRO_4D_Radar"): zabezpieczenie
+`if cross_norm < 1e-12` przed torsją chroni tylko przed dosłownym
+dzieleniem przez zero -- NIE chroni przed wzmocnieniem szumu, gdy
+trajektoria jest niemal (ale nie dokładnie) prostoliniowa. Przykład:
+v=(1,0,0), a=(1,1e-6,0) (typowy szum kierunku na "prostym" odcinku lotu)
+daje cross_norm=1e-6 -- nie łapie się w próg 1e-12, więc tau wychodzi
+rzędu 1e6 zamiast ~0. Poprawka: bramkowanie torsji na podstawie samej
+krzywizny kappa (fizycznie sensowna wielkosc), nie na cross_norm wprost:
+jeśli kappa < min_curvature -> tau = 0. Domyślne min_curvature=1e-4,
+podobnie jak min_speed, to punkt startowy wymagający kalibracji na
+realnych danych.
 """
 
 from __future__ import annotations
@@ -55,6 +68,7 @@ from typing import Tuple
 
 
 DEFAULT_MIN_SPEED = 1.0
+DEFAULT_MIN_CURVATURE = 1e-4
 
 
 @dataclass
@@ -78,10 +92,17 @@ class CurvatureDetector3D:
                 ...  # podejrzana zmiana płaszczyzny lotu (np. korkociąg)
     """
 
-    def __init__(self, min_speed: float = DEFAULT_MIN_SPEED):
+    def __init__(
+        self,
+        min_speed: float = DEFAULT_MIN_SPEED,
+        min_curvature: float = DEFAULT_MIN_CURVATURE,
+    ):
         if min_speed < 0:
             raise ValueError("min_speed nie może być ujemne")
+        if min_curvature < 0:
+            raise ValueError("min_curvature nie może być ujemne")
         self.min_speed = min_speed
+        self.min_curvature = min_curvature
         self._positions: deque[Tuple[float, float, float]] = deque(maxlen=4)
 
     def reset(self) -> None:
@@ -109,9 +130,12 @@ class CurvatureDetector3D:
 
         kappa = cross_norm / speed**3
 
-        if cross_norm < 1e-12:
-            # tor lokalnie prostoliniowy (a rownolegle do v, albo a=0) --
-            # torsja niezdefiniowana przy zerowej krzywiznie, zwracamy 0
+        if kappa < self.min_curvature:
+            # tor lokalnie prostoliniowy -- bramkujemy na podstawie kappa,
+            # nie samego cross_norm==0/1e-12 (ktore chroni tylko przed
+            # dzieleniem przez doslowne zero, nie przed wzmacnianiem
+            # szumu gdy trajektoria jest niemal, ale nie dokladnie,
+            # prosta -- patrz docstring modulu)
             tau = 0.0
         else:
             tau = float(np.dot(v_cross_a, j)) / cross_norm**2
