@@ -131,6 +131,47 @@ def test_rotation_invariance_arbitrary_3d_axis():
         assert abs(a.torsion - b.torsion) < 1e-6
 
 
+def test_near_straight_noisy_direction_gives_zero_torsion_not_blowup():
+    """Regresja: znaleziony przy okazji sprawdzania pseudokodu
+    THE_GEO_PRO_4D_Radar blad -- stary warunek `cross_norm < 1e-12`
+    chronil tylko przed dzieleniem przez doslowne zero, nie przed
+    wzmocnieniem szumu gdy trajektoria jest niemal (ale nie dokladnie)
+    prosta. Ten test wymusza male, ale nie zerowe odchylenie kierunku
+    (typowy szum sensora) i sprawdza, ze torsja zostaje wyzerowana
+    przez bramkowanie na kappa, zamiast eksplodowac do rzedu 1e6."""
+    det = CurvatureDetector3D(min_speed=0.0)
+    det.update(0.0, 0.0, 0.0)
+    det.update(1.0, 0.0, 0.0)
+    det.update(2.0, 0.0, 0.0)
+    r = det.update(3.0, 1e-6, 0.0)  # male odchylenie zamiast idealnej prostej
+    assert r.gated is False
+    assert abs(r.torsion) < 1e-6
+
+
+def test_min_curvature_gate_does_not_affect_real_helix():
+    """Upewnij sie, ze nowe bramkowanie na kappa nie psuje prawdziwej,
+    dobrze zakrzywionej trajektorii (kappa >> domyslny prog)."""
+    det = CurvatureDetector3D(min_speed=0.0)
+    r, c = 5.0, 1.0
+    kappa_true = r / (r * r + c * c)
+    tau_true = c / (r * r + c * c)
+    dt = 0.02
+    for k in range(4):
+        t = 2.0 + k * dt
+        res = det.update(r * math.cos(t), r * math.sin(t), c * t)
+    assert res.gated is False
+    assert abs(res.curvature - kappa_true) / kappa_true < 0.01
+    assert abs(res.torsion - tau_true) / tau_true < 0.01
+
+
+def test_min_curvature_rejects_negative():
+    try:
+        CurvatureDetector3D(min_curvature=-0.1)
+        assert False, "powinno rzucic ValueError"
+    except ValueError:
+        pass
+
+
 def test_min_speed_rejects_negative():
     try:
         CurvatureDetector3D(min_speed=-1.0)
