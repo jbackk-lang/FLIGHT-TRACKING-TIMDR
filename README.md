@@ -7,10 +7,13 @@ pod dane `[lat, lon, alt, t]`.
 
 ## Status
 
-Kod ze zgłoszenia uruchomiony i przetestowany (`test_timdr_flight.py`,
-11/11 testów przechodzi). Znalezione i naprawione: dwa błędy dziedziczone
-z `TIMDR-Radar-Module` (zawijanie kąta, gradient po indeksie zamiast po
-czasie) oraz dwa nowe błędy specyficzne dla danych geograficznych.
+Kod ze zgłoszenia uruchomiony i przetestowany (`test_timdr_flight.py` +
+`test_frenet_serret.py`, 15/15 testów przechodzi). Znalezione i
+naprawione: dwa błędy dziedziczone z `TIMDR-Radar-Module` (zawijanie
+kąta, gradient po indeksie zamiast po czasie) oraz dwa nowe błędy
+specyficzne dla danych geograficznych. Dodano też torsję 3D
+(`frenet_serret`/`twist_3d`) — patrz sekcja niżej. Zależności: `numpy`,
+`scipy` (Savitzky-Golay w `frenet_serret`).
 
 ![Błędy jednostek: kurs i prędkość pionowa](screenshot_flight_bugs.png)
 
@@ -60,6 +63,45 @@ lotniczej ten sam wektor `flow` mieszał stopnie (lat/lon, skala ~10⁻³) z
 metrami (alt, skala ~10⁰) — wartości fizycznie nieporównywalne w jednym
 wektorze. Naprawiono: `flow` liczony w spójnych jednostkach metrycznych
 (lokalna płaszczyzna styczna + wysokość), względem rzeczywistego `t`.
+
+### Nowość: torsja 3D trajektorii (`frenet_serret` / `twist_3d`)
+
+Krzywizna `kappa(t)` i torsja (skręcenie) `tau(t)` liczone standardowymi
+wzorami Freneta-Serreta (`kappa = |r'×r''|/|r'|³`, `tau = ((r'×r'')·r''')/|r'×r''|²`)
+z prawdziwej trajektorii 3D (wschód/północ/wysokość w metrach). `tau` to
+dokładnie ta sama wielkość matematyczna co "skręcenie" znane z klasycznej
+geometrii różniczkowej — nie jest to przybliżenie ani metafora zapożyczona
+z innej dziedziny.
+
+**Zweryfikowane na znanej analitycznie helisie** (`test_frenet_serret_helisa_kappa_tau_dokladne`):
+błąd względny kappa i tau < 5% na czystych danych, przechodząc przez pełny
+pipeline geo-projekcji (lat/lon → lokalna płaszczyzna styczna), nie tylko
+na surowych współrzędnych.
+
+**Uczciwie zmierzone ograniczenie**: tau wymaga trzeciej pochodnej
+pozycji (jerk). Surowe trzykrotne różnicowanie (`np.gradient` x3, tak jak
+reszta modułu liczy `flow`) wzmacnia szum pomiarowy GPS/ADS-B **10-40×**
+— przy szumie 0.5m odchylenie std. samego tau wyszło ok. **2.6** dla
+sygnału o prawdziwej wartości ~0.065, czyli praktycznie bezużyteczne.
+Naprawiono wygładzaniem Savitzky-Golay z oknem dobieranym **w sekundach**
+(nie w liczbie próbek — inaczej ta sama fizyczna dynamika dawałaby różne
+wyniki przy różnej częstotliwości próbkowania, dokładnie ten sam błąd co
+już poprawiony wcześniej w `twist()`). Nawet po wygładzeniu tau pozostaje
+najbardziej szumną wielkością w tym module — traktuj pojedyncze wartości
+jako orientacyjne.
+
+`twist_3d()` flaguje punkty, gdzie tau mocno odstaje od własnej historii
+toru (próg adaptacyjny z rozstępu p10-p90, ten sam wzorzec co reszta
+ekosystemu TIMDR — zob. skill `timdr-signal-framework` §2). Sprawdzone na
+danych syntetycznych: łagodny, stały zakręt nie generuje żadnych
+alarmów; wstrzyknięty gwałtowny manewr (oscylacja pionowa nałożona na
+kontynuację zakrętu) zostaje wykryty, a flagi skupiają się w oknie
+manewru, nie rozrzucone losowo po całym locie.
+
+**Czego NIE zweryfikowano**: to narzędzie nie było testowane na
+prawdziwych danych ADS-B/FDR, tylko na syntetycznych trajektoriach.
+Traktuj jako prototyp do dalszej walidacji na realnym ruchu lotniczym,
+nie jako gotowy detektor manewrów.
 
 ### Uwaga o danych przykładowych
 

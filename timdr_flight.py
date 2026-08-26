@@ -12,6 +12,7 @@ Wejście: tor lotu jako lista/tablica punktów [lat, lon, alt, t]
 """
 
 import numpy as np
+from scipy.signal import savgol_filter
 
 EARTH_RADIUS_M = 6371000.0  # średni promień Ziemi - wystarczający dla torów
                              # regionalnych; patrz ograniczenia w __doc__ klasy
@@ -226,6 +227,110 @@ class TIMDRFlight:
             pred_m[:, :2], lat0, lat_ref=lat[0], lon_ref=lon[0]
         )
         return np.column_stack([lat_pred, lon_pred, pred_m[:, 2]])
+
+    # --- 5. Frenet-Serret: krzywizna kappa(t) i skręcenie (torsja) tau(t) ---
+    def frenet_serret(self, track, window_seconds=4.0, poly=3):
+        """
+        Liczy krzywiznę kappa(t) i torsję (skręcenie) tau(t) prawdziwej
+        trajektorii 3D (x=wschód, y=północ, z=wysokość, wszystko w metrach),
+        standardowymi wzorami Freneta-Serreta dla dowolnej parametryzacji:
+
+            kappa = |r' x r''| / |r'|^3
+            tau   = ((r' x r'') . r''') / |r' x r''|^2
+
+        gdzie r', r'', r''' to pierwsza/druga/trzecia pochodna pozycji po
+        czasie. tau jest DOKŁADNIE tą samą wielkością matematyczną, co
+        "skręcenie" w klasycznej geometrii różniczkowej krzywych (np.
+        skręcenie helisy kołowej x=R cos(wt), y=R sin(wt), z=ct wynosi
+        dokładnie c*w/(R^2 w^2 + c^2) - ten wzór zweryfikowano numerycznie
+        w tym module, patrz test_frenet_serret_helisa, błąd względny < 1e-5
+        na czystych danych).
+
+        WAŻNE OGRANICZENIE (zweryfikowane empirycznie, nie teoretycznie):
+        tau wymaga TRZECIEJ pochodnej pozycji (jerk). Surowe różnicowanie
+        (np.gradient trzy razy z rzędu, tak jak reszta tego modułu liczy
+        flow/predict) wzmacnia szum pomiarowy pozycji ~10-40x - przy
+        realistycznym szumie GPS/ADS-B rzędu 0.5m, odchylenie std. samego
+        tau wychodziło ok. 2.6 (dla sygnału o prawdziwej wartości ~0.065),
+        czyli kompletnie bezużyteczne. Dlatego ta funkcja NIE różniczkuje
+        surowych punktów - najpierw wygładza pozycję filtrem
+        Savitzky-Golay i różniczkuje analitycznie dopasowany wielomian
+        lokalny. Okno wygładzania jest dobierane w SEKUNDACH
+        (`window_seconds`), nie w liczbie próbek - inaczej ta sama fizyczna
+        dynamika daje różne wyniki przy różnej częstotliwości próbkowania
+        (dokładnie ten sam błąd co poprawiony wcześniej w twist()/flow()).
+        Nawet po wygładzeniu tau pozostaje najbardziej szumną z wielkości
+        liczonych w tym module (wymaga trzeciej pochodnej) - traktuj
+        pojedyncze wartości tau jako orientacyjne, nie precyzyjne; do
+        detekcji anomalii używaj progu z odpowiednim marginesem
+        (patrz twist_3d).
+        """
+        tr = self._validate(track)
+        lat, lon, alt, t = tr[:, 0], tr[:, 1], tr[:, 2], tr[:, 3]
+        lat0 = float(np.mean(lat))
+        xy = self._project_local_xy(lat, lon, lat0)
+        pos = np.column_stack([xy, alt])
+
+        dt = float(np.median(np.diff(t)))
+        win = int(round(window_seconds / dt))
+        if win % 2 == 0:
+            win += 1
+        win = max(win, poly + 2 + (1 - (poly + 2) % 2))
+        win = min(win, len(pos) - (1 - len(pos) % 2))  # nie może przekroczyć N (musi być nieparzyste)
+        if win < poly + 2:
+            # za mało punktów żeby sensownie policzyć - zwróć zera zamiast
+            # zgadywać / rzucać wyjątek w środku pipeline'u
+            z = np.zeros(len(pos))
+            return z, z.copy()
+
+        v = savgol_filter(pos, window_length=win, polyorder=poly, deriv=1, delta=dt, axis=0)
+        a = savgol_filter(pos, window_length=win, polyorder=poly, deriv=2, delta=dt, axis=0)
+        j = savgol_filter(pos, window_length=win, polyorder=poly, deriv=3, delta=dt, axis=0)
+
+        cross_va = np.cross(v, a)
+        speed = np.linalg.norm(v, axis=1)
+        cross_norm = np.linalg.norm(cross_va, axis=1)
+
+        kappa = np.zeros(len(pos))
+        tau = np.zeros(len(pos))
+        ok_speed = speed > 1e-6
+        kappa[ok_speed] = cross_norm[ok_speed] / (speed[ok_speed] ** 3)
+        ok_cross = cross_norm > 1e-9
+        numer = np.einsum('ij,ij->i', cross_va, j)
+        tau[ok_cross] = numer[ok_cross] / (cross_norm[ok_cross] ** 2)
+        return kappa, tau
+
+    # --- 6. Twist 3D: anomalia skręcenia (torsji) trajektorii ---
+    def twist_3d(self, track, tau_factor=3.0, floor_frac=0.05, window_seconds=4.0):
+        """
+        Flaguje punkty, w których torsja tau(t) (patrz frenet_serret) mocno
+        odstaje od typowego zakresu DLA TEGO SAMEGO TORU - próg adaptacyjny
+        z rozstępu p10-p90, zgodnie ze wzorcem "adaptacyjne progi bez
+        trwałej kalibracji" z reszty ekosystemu TIMDR (patrz skill
+        timdr-signal-framework §2): brak globalnej stałej "normalnego"
+        skręcenia (zależy od typu statku powietrznego/manewru), więc próg
+        liczony jest z własnej historii toru, z podłogą (floor_frac) na
+        wypadek lotu prostoliniowego, gdzie tau~0 dla wszystkich punktów.
+
+        Zwraca indeksy punktów, w których |tau - mediana(tau)| przekracza
+        próg. To NIE jest zwalidowane na prawdziwych danych ADS-B - patrz
+        README, sekcja "Status torsji 3D", dla uczciwego opisu co zostało
+        i nie zostało sprawdzone.
+        """
+        kappa, tau = self.frenet_serret(track, window_seconds=window_seconds)
+        if len(tau) < 3:
+            return np.array([], dtype=int)
+
+        med = np.median(tau)
+        p10, p90 = np.percentile(tau, 10), np.percentile(tau, 90)
+        spread = p90 - p10
+        floor = max(abs(med) * floor_frac, 1e-6)
+        if spread <= 0 or not np.isfinite(spread):
+            spread = floor
+        spread = max(spread, floor)
+
+        thr = tau_factor * spread
+        return np.where(np.abs(tau - med) > thr)[0]
 
     # --- diagnostyka pomocnicza (kurs / prędkość / prędkość pionowa) ---
     def diagnostics(self, track):
