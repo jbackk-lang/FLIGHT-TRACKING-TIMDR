@@ -158,6 +158,81 @@ kolizyjny/bezpieczna separacja pionowa/bezpieczny odstęp poziomy) na
 mapie i zapisuje `conflict_alert_przyklady.png`. Uruchamiane automatycznie
 przez `run.bat` (patrz niżej).
 
+## Porównanie z realnymi systemami i kierunki rozwoju
+
+### Jak to wypada na tle FlightRadar24/FlightAware i STCA
+
+**Pozyskiwanie danych (FlightRadar24/FlightAware)**: nieporównywalne
+wprost. Te systemy działają na ADS-B — pozycja z GPS transpondera,
+dokładność rzędu pojedynczych metrów, aktualizacja co kilka sekund przy
+gęstej sieci naziemnych stacji odbiorczych (FlightAware: ponad 1000
+stacji w 70+ krajach). TIMDR nie ma własnego źródła danych — to
+biblioteka analityczna, której trzeba dostarczyć tor jako gotową tablicę
+punktów; dokładność zależy całkowicie od tego, co się do niej wrzuci.
+
+**Predykcja krótkoterminowa (`predict`)**: realnie porównywalna z
+najprostszą, najpowszechniejszą metodą używaną w STCA — filtrem liniowym
+(dead reckoning) z horyzontem patrzenia ~2 minuty. `predict()` jest
+odrobinę bardziej rozbudowany (lokalnie stałe przyspieszenie, nie tylko
+stała prędkość), ale ten sam rząd wielkości sofistykacji i to samo
+ograniczenie (zawodzi przy manewrze).
+
+**Wykrywanie konfliktów (`conflict_alert`/`conflict_alert_fleet`)**:
+robi tę samą kategorię zadania co STCA (przewidywana separacja par
+torów, progi ICAO, skan wszystkich par we "flocie"), tą samą
+fundamentalną metodą (liniowa/kinematyczna predykcja). To co odróżnia to
+od realnego STCA nie jest brakującą funkcją do dopisania, tylko
+brakującym kontekstem: STCA wie o planie lotu i zgodach kontrolera i
+dzięki temu wycisza alarmy dla w pełni bezpiecznych, zaplanowanych
+skrzyżowań kursów na różnych poziomach — TIMDR tego kontekstu nie ma i
+nie może mieć bez zewnętrznego źródła danych o planach lotu.
+
+**Wygładzanie/estymacja stanu**: `trm_reduce()` to średnia krocząca
+3-punktowa. Realny STCA (i każdy poważny tracker) używa filtru Kalmana z
+propagacją niepewności (macierze P/Q/R). To zostaje największą
+architektoniczną luką — słabsza estymacja prędkości/przyspieszenia
+wpływa na WSZYSTKO w tym module (`predict`, `twist`, `conflict_alert`,
+`frenet_serret`), nie tylko na samo wygładzanie.
+
+**Torsja 3D (`frenet_serret`/`twist_3d`)**: tu TIMDR robi coś, czego
+komercyjne trackery w ogóle nie oferują (nie muszą — to nie ich zadanie),
+bo liczy prawdziwą wielkość różniczkowo-geometryczną z trajektorii, nie
+tylko wyświetla pozycję.
+
+### Kierunki rozwoju
+
+**Zalecane, dobry stosunek wysiłku do wartości:**
+- Prawdziwy filtr Kalmana (macierze P/Q/R, jak w realnym STCA) zamiast
+  `trm_reduce()`'s średniej 3-punktowej — poprawiłby jednocześnie
+  `predict()`, `twist()`, `conflict_alert()` i `frenet_serret()`, bo
+  wszystkie opierają się na tej samej estymacji prędkości/przyspieszenia.
+  Większy nakład niż dotychczasowe zmiany, ale architektonicznie
+  najbardziej wartościowy pojedynczy krok.
+- Indeksowanie przestrzenne (np. KD-drzewo) dla `conflict_alert_fleet()`
+  przy większej liczbie torów — ten sam problem O(n²) już raz
+  rozwiązany w `TIMDR-Radar-Module`, dałoby się przenieść wprost.
+
+**Świadomie odradzane (wymagają danych/infrastruktury, których ten
+projekt nie ma i które zmieniłyby go w zupełnie inny rodzaj systemu):**
+- Integracja z planem lotu / zgodami kontrolera — wymaga zewnętrznego
+  źródła planów lotu, którego tu nie ma.
+- Strumieniowanie danych na żywo — wymaga infrastruktury odbiorczej
+  ADS-B (albo płatnego API), poza zakresem biblioteki analitycznej.
+
+Krótko: TIMDR dobrze pokrywa najprostszą kategorię metod używanych w
+realnych systemach (liniowa predykcja + progi separacji + wygładzanie),
+i to pokrycie jest teraz szersze (cała flota, różne typy przestrzeni) niż
+na początku. Nie zbliżył się i nie powinien udawać, że się zbliża, do
+tego co czyni realne systemy bezpiecznymi operacyjnie: świadomości
+kontekstu (plan lotu, zgody) i jakości estymacji stanu (prawdziwy filtr).
+
+Źródła użytych liczb: [Flightradar24 — ADS-B](https://www.flightradar24.com/blog/ads-b/),
+[Aerodata — porównanie trackerów](https://aerodata.ai/flightradar24-vs-flightaware-vs-ads-b-exchange-which-tracker-is-best/),
+[Short-term conflict alert — Wikipedia](https://en.wikipedia.org/wiki/Short-term_conflict_alert),
+[STCA — SKYbrary](https://skybrary.aero/articles/short-term-conflict-alert-stca),
+[Separation Standards — SKYbrary](https://skybrary.aero/articles/separation-standards),
+[EUROCONTROL — ECAC radar separation minima](https://www.eurocontrol.int/sites/default/files/publication/content/documents/nm/ecac_radar_sep_min.pdf).
+
 ### Uwaga o danych przykładowych
 
 Diagnostyka (`diagnostics()`) na torze ze zgłoszenia pokazuje prędkość
