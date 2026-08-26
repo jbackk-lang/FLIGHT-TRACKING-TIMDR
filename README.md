@@ -8,7 +8,8 @@ pod dane `[lat, lon, alt, t]`.
 ## Status
 
 Kod ze zgłoszenia uruchomiony i przetestowany (`test_timdr_flight.py` +
-`test_frenet_serret.py`, 15/15 testów przechodzi). Znalezione i
+`test_frenet_serret.py` + `test_conflict_alert.py` +
+`test_conflict_fleet_airspace.py`, 27/27 testów przechodzi). Znalezione i
 naprawione: dwa błędy dziedziczone z `TIMDR-Radar-Module` (zawijanie
 kąta, gradient po indeksie zamiast po czasie) oraz dwa nowe błędy
 specyficzne dla danych geograficznych. Dodano też torsję 3D
@@ -129,12 +130,28 @@ złapał to jako brak wykrytego konfliktu tam, gdzie oczywiście powinien
 wystąpić. Naprawiono: `_kinematic_state()` rzutuje oba tory na **jeden
 wspólny** punkt odniesienia (średnia lat/lon obu torów).
 
+**Presety przestrzeni powietrznej** (`airspace="en_route"|"tma"|"final_approach"`,
+patrz `AIRSPACE_PRESETS`): wartości sprawdzone źródłowo (ICAO Doc 4444 /
+ECAC) — en-route 5 NM, TMA 3 NM, final approach 2.5 NM, wszystkie 1000 ft
+pionowo. Jawnie podane `horizontal_nm`/`vertical_ft` zawsze nadpisują
+preset. To rozsądne wartości domyślne do analizy/demo, NIE oficjalnie
+zatwierdzone minima dla konkretnej, realnej przestrzeni.
+
+**`conflict_alert_fleet(tracks, ...)`**: `conflict_alert()` uruchomione
+dla każdej pary torów naraz (skan O(n²), jak realny STCA sprawdza
+wszystkie pary w monitorowanej przestrzeni, nie jedną z góry wybraną
+parę). `tracks` to słownik `{etykieta: tor}` — wynik jednoznacznie
+wskazuje, która para koliduje. Posortowane po pilności
+(`time_to_conflict_s` rosnąco). Dla dużej liczby torów (setki+) O(n²)
+byłoby wolne bez indeksowania przestrzennego — dla garstki torów
+(prototyp/demo) nieistotne.
+
 **Uczciwe ograniczenia (to NIE jest certyfikowany system bezpieczeństwa
 ATC)**: brak modelowania planu lotu/przydzielonych poziomów/intencji
-pilota, brak strojenia progów per typ przestrzeni powietrznej (TMA ma
-inne minima niż en-route), zakłada że oba tory reprezentują z grubsza ten
-sam moment "teraz" (starszy tor jest doekstrapolowany do czasu nowszego
-tym samym modelem kinematycznym, co dokłada swój błąd).
+pilota, zakłada że oba tory reprezentują z grubsza ten sam moment "teraz"
+(starszy tor jest doekstrapolowany do czasu nowszego tym samym modelem
+kinematycznym, co dokłada swój błąd), skan floty O(n²) bez optymalizacji
+przestrzennej.
 
 Wizualizacja: `demo_conflict_map.py` rysuje 3 gotowe przykłady (kurs
 kolizyjny/bezpieczna separacja pionowa/bezpieczny odstęp poziomy) na
