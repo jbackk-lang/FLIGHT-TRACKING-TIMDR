@@ -336,6 +336,21 @@ class TIMDRFlight:
     NM_TO_M = 1852.0
     FT_TO_M = 0.3048
 
+    # Minima separacji wg ICAO Doc 4444 / regionalnych standardów radaru
+    # (m.in. EUROCONTROL/ECAC) - sprawdzone źródłowo, nie wymyślone:
+    #  - en-route: 5 NM poziomo (czasem 10 NM w obszarach o dużej
+    #    złożoności ruchu), 1000 ft pionowo (RVSM)
+    #  - TMA (rejon kontrolowany lotniska): 3 NM poziomo, 1000 ft pionowo
+    #  - final approach (końcowe podejście): 2.5 NM poziomo, 1000 ft pionowo
+    # Rzeczywiste wartości różnią się per kraj/region i wymagają lokalnego
+    # zatwierdzenia - to rozsądne, źródłowo poparte wartości domyślne do
+    # analizy/demonstracji, NIE oficjalne minima dla konkretnej przestrzeni.
+    AIRSPACE_PRESETS = {
+        "en_route": {"horizontal_nm": 5.0, "vertical_ft": 1000.0},
+        "tma": {"horizontal_nm": 3.0, "vertical_ft": 1000.0},
+        "final_approach": {"horizontal_nm": 2.5, "vertical_ft": 1000.0},
+    }
+
     def _kinematic_state(self, track, lat0_shared, lon0_shared):
         """Stan kinematyczny (pozycja/prędkość/przyspieszenie) w OSTATNIM
         punkcie toru, rzutowany na WSPÓLNĄ lokalną płaszczyznę styczną
@@ -361,18 +376,21 @@ class TIMDRFlight:
         a = np.gradient(v, t, axis=0)
         return pos_m[-1], v[-1], a[-1], t[-1]
 
-    def conflict_alert(self, track_a, track_b, horizontal_nm=5.0,
-                        vertical_ft=1000.0, lookahead_seconds=120.0,
-                        step_seconds=1.0):
+    def conflict_alert(self, track_a, track_b, horizontal_nm=None,
+                        vertical_ft=None, airspace="en_route",
+                        lookahead_seconds=120.0, step_seconds=1.0):
         """
         Przewiduje ruch DWÓCH torów naprzód (ten sam model - lokalnie
         stałe przyspieszenie - co predict()) i sprawdza, czy w oknie
         `lookahead_seconds` istnieje moment, w którym separacja pozioma
         I pionowa JEDNOCZEŚNIE spadają poniżej progów.
 
-        Domyślne progi (5 NM poziomo, 1000 ft pionowo) to standardowe
-        minima separacji ICAO dla kontrolowanej przestrzeni en-route
-        (RVSM) - nie wymyślone liczby. Domyślny horyzont 120s odpowiada
+        Progi: podaj `airspace` ("en_route"/"tma"/"final_approach", patrz
+        AIRSPACE_PRESETS) ALBO jawnie `horizontal_nm`/`vertical_ft` - jawne
+        wartości zawsze nadpisują preset, jeśli podane. Domyślny airspace
+        "en_route" (5 NM / 1000 ft) to standardowe minima separacji ICAO
+        dla kontrolowanej przestrzeni en-route (RVSM) - nie wymyślone
+        liczby. Domyślny horyzont 120s odpowiada
         typowemu horyzontowi patrzenia STCA (rzeczywiste systemy STCA
         ograniczają się do ~2 minut właśnie dlatego, że dalej liniowa/
         kinematyczna predykcja przestaje być wiarygodna - to samo
@@ -391,15 +409,28 @@ class TIMDRFlight:
           ani intencji pilota/kontrolera - to czysta ekstrapolacja
           kinematyczna, zawodzi przy każdym manewrze w oknie predykcji
           (dokładnie tak samo jak predict()).
-        - Brak strojenia progów per typ przestrzeni powietrznej (TMA ma
-          inne, mniejsze minima niż en-route) - trzeba jawnie podać
-          `horizontal_nm`/`vertical_ft` dla innego kontekstu niż en-route.
+        - Presety AIRSPACE_PRESETS to rozsądne, źródłowo poparte wartości
+          domyślne (ICAO Doc 4444 / ECAC), NIE oficjalnie zatwierdzone
+          minima dla konkretnej, realnej przestrzeni powietrznej - do
+          tego zawsze potrzebny lokalny dokument operacyjny.
 
         Zwraca słownik: conflict (bool), time_to_conflict_s (float albo
         None), min_horizontal_nm, min_vertical_ft w momencie najmniejszej
         separacji poziomej w oknie (do diagnostyki nawet gdy nie ma
         alarmu).
         """
+        if airspace not in self.AIRSPACE_PRESETS:
+            raise ValueError(
+                f"Nieznana przestrzeń '{airspace}'. Dostępne presety: "
+                f"{list(self.AIRSPACE_PRESETS)} (albo podaj jawnie "
+                f"horizontal_nm/vertical_ft)."
+            )
+        preset = self.AIRSPACE_PRESETS[airspace]
+        if horizontal_nm is None:
+            horizontal_nm = preset["horizontal_nm"]
+        if vertical_ft is None:
+            vertical_ft = preset["vertical_ft"]
+
         tr_a = self._validate(track_a)
         tr_b = self._validate(track_b)
         lat0_shared = float(np.mean(np.concatenate([tr_a[:, 0], tr_b[:, 0]])))
@@ -444,7 +475,48 @@ class TIMDRFlight:
             "min_horizontal_time_s": float(taus[i_min_h]),
             "horizontal_threshold_nm": horizontal_nm,
             "vertical_threshold_ft": vertical_ft,
+            "airspace": airspace,
         }
+
+    # --- 8. Conflict alert dla floty: wszystkie pary naraz ---
+    def conflict_alert_fleet(self, tracks, include_safe=False, **kwargs):
+        """
+        `conflict_alert()` uruchomione dla KAŻDEJ pary torów w `tracks`
+        (skan O(n²), tak jak realny STCA sprawdza wszystkie pary
+        samolotów w monitorowanej przestrzeni, nie tylko jedną z góry
+        wybraną parę).
+
+        `tracks`: słownik {etykieta: tor} (etykieta = np. numer lotu/ID) -
+        słownik zamiast listy, żeby wynik jednoznacznie wskazywał KTÓRA
+        para koliduje, nie tylko że coś koliduje.
+        `include_safe`: jeśli True, zwraca też pary bez konfliktu (do
+        diagnostyki/wizualizacji); domyślnie tylko realne konflikty.
+        `**kwargs`: przekazywane wprost do conflict_alert() (airspace,
+        horizontal_nm, vertical_ft, lookahead_seconds, step_seconds).
+
+        Zwraca listę słowników: każdy to wynik conflict_alert() plus
+        klucze "a_id"/"b_id" identyfikujące parę. Posortowana rosnąco po
+        time_to_conflict_s (najpilniejsze konflikty pierwsze; pary bez
+        konfliktu - jeśli include_safe=True - na końcu).
+
+        UWAGA: skalowanie O(n²) - dla dużej liczby torów (setki+) to
+        wolne bez przestrzennego indeksowania (patrz TIMDR-Radar-Module,
+        gdzie identyczny problem O(n²) rozwiązano KD-drzewem) - dla
+        prototypu/demo z garstką torów nieistotne, dla realnego ruchu w
+        gęstej przestrzeni powietrznej wymagałoby tej samej optymalizacji.
+        """
+        import itertools
+        labels = list(tracks.keys())
+        results = []
+        for a_id, b_id in itertools.combinations(labels, 2):
+            r = self.conflict_alert(tracks[a_id], tracks[b_id], **kwargs)
+            r["a_id"] = a_id
+            r["b_id"] = b_id
+            if r["conflict"] or include_safe:
+                results.append(r)
+
+        results.sort(key=lambda r: (r["time_to_conflict_s"] is None, r["time_to_conflict_s"]))
+        return results
 
     # --- diagnostyka pomocnicza (kurs / prędkość / prędkość pionowa) ---
     def diagnostics(self, track):
