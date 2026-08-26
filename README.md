@@ -103,6 +103,44 @@ prawdziwych danych ADS-B/FDR, tylko na syntetycznych trajektoriach.
 Traktuj jako prototyp do dalszej walidacji na realnym ruchu lotniczym,
 nie jako gotowy detektor manewrów.
 
+### Conflict alert (`conflict_alert`) — przewidywana separacja dwóch torów
+
+Rozszerzenie inspirowane porównaniem z realnym STCA (Short-Term Conflict
+Alert) używanym w kontroli ruchu lotniczego. Bierze dwa tory, przewiduje
+ich ruch naprzód tym samym modelem kinematycznym co `predict()`
+(lokalnie stałe przyspieszenie), i sprawdza, czy w oknie czasowym istnieje
+moment, w którym separacja pozioma I pionowa jednocześnie spadają poniżej
+progu.
+
+Domyślne progi (**5 NM poziomo, 1000 ft pionowo**) to prawdziwe minima
+separacji ICAO dla kontrolowanej przestrzeni en-route (RVSM) — sprawdzone
+źródłowo, nie zmyślone. Domyślny horyzont 120s odpowiada typowemu
+horyzontowi patrzenia realnego STCA (dalej liniowa/kinematyczna predykcja
+przestaje być wiarygodna — to samo ograniczenie ma już `predict()`).
+
+**Realny błąd znaleziony i naprawiony własnym testem**: pierwsza wersja
+używała `_project_local_xy()` (tej samej co reszta modułu) do rzutowania
+obu torów na płaszczyznę metryczną — ale ta funkcja liczy origin
+względem **pierwszego punktu KAŻDEGO toru z osobna** (`lon[0]`/`lat[0]`).
+Dla dwóch różnych torów dawało to dwa różne, niewspółmierne układy
+współrzędnych — odejmowanie pozycji nie miało fizycznego sensu.
+Test na jednoznacznym scenariuszu (dwa samoloty lecące wprost na siebie)
+złapał to jako brak wykrytego konfliktu tam, gdzie oczywiście powinien
+wystąpić. Naprawiono: `_kinematic_state()` rzutuje oba tory na **jeden
+wspólny** punkt odniesienia (średnia lat/lon obu torów).
+
+**Uczciwe ograniczenia (to NIE jest certyfikowany system bezpieczeństwa
+ATC)**: brak modelowania planu lotu/przydzielonych poziomów/intencji
+pilota, brak strojenia progów per typ przestrzeni powietrznej (TMA ma
+inne minima niż en-route), zakłada że oba tory reprezentują z grubsza ten
+sam moment "teraz" (starszy tor jest doekstrapolowany do czasu nowszego
+tym samym modelem kinematycznym, co dokłada swój błąd).
+
+Wizualizacja: `demo_conflict_map.py` rysuje 3 gotowe przykłady (kurs
+kolizyjny/bezpieczna separacja pionowa/bezpieczny odstęp poziomy) na
+mapie i zapisuje `conflict_alert_przyklady.png`. Uruchamiane automatycznie
+przez `run.bat` (patrz niżej).
+
 ### Uwaga o danych przykładowych
 
 Diagnostyka (`diagnostics()`) na torze ze zgłoszenia pokazuje prędkość
@@ -188,4 +226,6 @@ pred = timdr.predict(track)
 diag = timdr.diagnostics(track)
 ```
 
-Uruchomienie: `python demo.py` / testy: `pytest -q`.
+Uruchomienie: `python demo.py` (podstawowe demo tekstowe) albo
+`run.bat` (Windows — instaluje zależności, uruchamia testy, generuje i
+otwiera mapę z 3 przykładami `conflict_alert()`). Testy: `pytest -q`.

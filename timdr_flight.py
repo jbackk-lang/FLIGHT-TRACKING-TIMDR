@@ -332,6 +332,120 @@ class TIMDRFlight:
         thr = tau_factor * spread
         return np.where(np.abs(tau - med) > thr)[0]
 
+    # --- 7. Conflict alert: przewidywana separacja między dwoma torami ---
+    NM_TO_M = 1852.0
+    FT_TO_M = 0.3048
+
+    def _kinematic_state(self, track, lat0_shared, lon0_shared):
+        """Stan kinematyczny (pozycja/prędkość/przyspieszenie) w OSTATNIM
+        punkcie toru, rzutowany na WSPÓLNĄ lokalną płaszczyznę styczną
+        (jeden i ten sam punkt odniesienia lat0/lon0 dla obu torów).
+
+        UWAGA (błąd znaleziony i naprawiony testem
+        test_konflikt_wykryty_gdy_dwa_samoloty_zbiegaja...): `_project_local_xy`
+        używanej w reszcie tego modułu rzutuje każdy tor względem JEGO
+        WŁASNEGO pierwszego punktu (`lon[0]`/`lat[0]`) - to jest w porządku
+        gdy analizuje się jeden tor osobno, ale przy PORÓWNYWANIU dwóch
+        torów dawało to dwa różne, niewspółmierne układy współrzędnych;
+        odejmowanie pozycji dawało liczby bez fizycznego sensu (test
+        złapał to jako brak wykrytego konfliktu w scenariuszu, w którym
+        oczywiście powinien wystąpić). Dlatego tu projekcja jest robiona
+        ręcznie, ze wspólnym, jawnie przekazanym originem.
+        """
+        tr = self._validate(track)
+        lat, lon, alt, t = tr[:, 0], tr[:, 1], tr[:, 2], tr[:, 3]
+        x = np.deg2rad(lon - lon0_shared) * EARTH_RADIUS_M * np.cos(np.deg2rad(lat0_shared))
+        y = np.deg2rad(lat - lat0_shared) * EARTH_RADIUS_M
+        pos_m = np.column_stack([x, y, alt])
+        v = np.gradient(pos_m, t, axis=0)
+        a = np.gradient(v, t, axis=0)
+        return pos_m[-1], v[-1], a[-1], t[-1]
+
+    def conflict_alert(self, track_a, track_b, horizontal_nm=5.0,
+                        vertical_ft=1000.0, lookahead_seconds=120.0,
+                        step_seconds=1.0):
+        """
+        Przewiduje ruch DWÓCH torów naprzód (ten sam model - lokalnie
+        stałe przyspieszenie - co predict()) i sprawdza, czy w oknie
+        `lookahead_seconds` istnieje moment, w którym separacja pozioma
+        I pionowa JEDNOCZEŚNIE spadają poniżej progów.
+
+        Domyślne progi (5 NM poziomo, 1000 ft pionowo) to standardowe
+        minima separacji ICAO dla kontrolowanej przestrzeni en-route
+        (RVSM) - nie wymyślone liczby. Domyślny horyzont 120s odpowiada
+        typowemu horyzontowi patrzenia STCA (rzeczywiste systemy STCA
+        ograniczają się do ~2 minut właśnie dlatego, że dalej liniowa/
+        kinematyczna predykcja przestaje być wiarygodna - to samo
+        ograniczenie ma tu `predict()`, więc `conflict_alert` dziedziczy
+        je wprost, nie jest to nowy, osobny kompromis).
+
+        WAŻNE, UCZCIWE OGRANICZENIA (to NIE jest certyfikowany system
+        bezpieczeństwa ATC):
+        - Oba tory muszą reprezentować w miarę ten sam moment "teraz"
+          (ostatnia próbka każdego toru). Jeśli jeden tor jest dużo
+          starszy niż drugi, jego stan jest ekstrapolowany do czasu
+          nowszego z nich przy TYCH SAMYCH założeniach kinematycznych
+          (stałe przyspieszenie) - błąd tej wstępnej ekstrapolacji dodaje
+          się do błędu głównej predykcji.
+        - Model nie wie nic o planie lotu, przydzielonych poziomach lotu
+          ani intencji pilota/kontrolera - to czysta ekstrapolacja
+          kinematyczna, zawodzi przy każdym manewrze w oknie predykcji
+          (dokładnie tak samo jak predict()).
+        - Brak strojenia progów per typ przestrzeni powietrznej (TMA ma
+          inne, mniejsze minima niż en-route) - trzeba jawnie podać
+          `horizontal_nm`/`vertical_ft` dla innego kontekstu niż en-route.
+
+        Zwraca słownik: conflict (bool), time_to_conflict_s (float albo
+        None), min_horizontal_nm, min_vertical_ft w momencie najmniejszej
+        separacji poziomej w oknie (do diagnostyki nawet gdy nie ma
+        alarmu).
+        """
+        tr_a = self._validate(track_a)
+        tr_b = self._validate(track_b)
+        lat0_shared = float(np.mean(np.concatenate([tr_a[:, 0], tr_b[:, 0]])))
+        lon0_shared = float(np.mean(np.concatenate([tr_a[:, 1], tr_b[:, 1]])))
+
+        pos_a, v_a, a_a, t_a = self._kinematic_state(track_a, lat0_shared, lon0_shared)
+        pos_b, v_b, a_b, t_b = self._kinematic_state(track_b, lat0_shared, lon0_shared)
+
+        t_ref = max(t_a, t_b)
+
+        # doprowadź starszy tor do wspolnego "teraz" (t_ref) tym samym
+        # modelem kinematycznym (stale przyspieszenie), zanim zaczniemy
+        # wlasciwa predykcje konfliktu od wspolnego punktu odniesienia
+        def _advance(pos, v, a, dt):
+            pos_new = pos + v * dt + 0.5 * a * dt * dt
+            v_new = v + a * dt
+            return pos_new, v_new
+
+        pos_a, v_a = _advance(pos_a, v_a, a_a, t_ref - t_a)
+        pos_b, v_b = _advance(pos_b, v_b, a_b, t_ref - t_b)
+
+        taus = np.arange(0.0, lookahead_seconds + step_seconds, step_seconds)
+        pa = pos_a[None, :] + v_a[None, :] * taus[:, None] + 0.5 * a_a[None, :] * (taus[:, None] ** 2)
+        pb = pos_b[None, :] + v_b[None, :] * taus[:, None] + 0.5 * a_b[None, :] * (taus[:, None] ** 2)
+
+        horiz_m = np.linalg.norm(pa[:, :2] - pb[:, :2], axis=1)
+        vert_m = np.abs(pa[:, 2] - pb[:, 2])
+
+        horiz_thr_m = horizontal_nm * self.NM_TO_M
+        vert_thr_m = vertical_ft * self.FT_TO_M
+
+        violation = (horiz_m < horiz_thr_m) & (vert_m < vert_thr_m)
+        conflict = bool(np.any(violation))
+        time_to_conflict = float(taus[np.argmax(violation)]) if conflict else None
+
+        i_min_h = int(np.argmin(horiz_m))
+        return {
+            "conflict": conflict,
+            "time_to_conflict_s": time_to_conflict,
+            "min_horizontal_nm": float(horiz_m[i_min_h] / self.NM_TO_M),
+            "min_vertical_ft": float(vert_m[i_min_h] / self.FT_TO_M),
+            "min_horizontal_time_s": float(taus[i_min_h]),
+            "horizontal_threshold_nm": horizontal_nm,
+            "vertical_threshold_ft": vertical_ft,
+        }
+
     # --- diagnostyka pomocnicza (kurs / prędkość / prędkość pionowa) ---
     def diagnostics(self, track):
         """
