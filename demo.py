@@ -1,4 +1,5 @@
 from timdr_flight import TIMDRFlight
+from timdr_flight_trigger import TIMDRFlightTrigger
 
 timdr = TIMDRFlight()
 
@@ -24,3 +25,9 @@ print("Prediction [lat, lon, alt]:\n", pred)
 print("Kurs (deg):", diag["course_deg"].round(1))
 print("Predkosc wzgledem ziemi (kt):", diag["ground_speed_kt"].round(1))
 print("Predkosc pionowa (ft/min):", diag["climb_rate_fpm"].round(0))
+
+trigger = TIMDRFlightTrigger()
+trig_result = trigger.analyze(track)
+print(f"\nTrigger integralnosci toru: {trig_result.trigger_type.value} "
+      f"(triggered={trig_result.triggered}, location={trig_result.location})")
+print(f"  {trig_result.message}")
