@@ -1,331 +1,424 @@
-# FLIGHT-TRACKING-TIMDR
+# THE
+TIMDR Hyperflow Engine (THE)
 
-Moduł analizy toru lotu (`timdr_flight.py`): gradient ruchu (TIMDR-flow),
-detekcja nagłych zmian kursu i wysokości (twist), redukcja szumu toru
-(TRM) i prosta predykcja trajektorii. Rozwinięcie `TIMDR-Radar-Module`
-pod dane `[lat, lon, alt, t]`.
+🧠 THE — rdzeń kodowy (pseudokod)
 
-## Status
+To jest minimalna, koncepcyjna struktura THE. Sekcje 1-7 poniżej to
+**język/metafora**, nie zwalidowany numerycznie kod — nie ma tu wielkości
+fizycznych do sprawdzenia względem wartości analitycznej, więc nie były
+testowane w ten sposób. Sekcja "THE-GEO PRO" niżej jest inna: opisuje
+konkretne wielkości geometryczne (krzywizna, skręt trajektorii), które
+*da się* sprawdzić względem wartości analitycznych — i po sprawdzeniu
+okazało się, że oryginalny wzór na skręt był błędny. Historia tej
+poprawki jest opisana w sekcji "THE-GEO PRO → THE-GEO PRO 4D" niżej.
 
-Kod ze zgłoszenia uruchomiony i przetestowany (`test_timdr_flight.py` +
-`test_frenet_serret.py` + `test_conflict_alert.py` +
-`test_conflict_fleet_airspace.py` + `test_timdr_flight_trigger.py`,
-34/34 testów przechodzi). Znalezione i naprawione: dwa błędy dziedziczone
-z `TIMDR-Radar-Module` (zawijanie kąta, gradient po indeksie zamiast po
-czasie) oraz dwa nowe błędy specyficzne dla danych geograficznych.
-Dodano też torsję 3D (`frenet_serret`/`twist_3d`) — patrz sekcja niżej.
-Zależności: `numpy`, `scipy` (Savitzky-Golay w `frenet_serret`).
+Nie jest to implementacja w żadnym języku — to jest język THE.
 
-**`timdr_flight_trigger.py`** — czujnik integralności JEDNEGO toru (NIE
-model): `TIMDRFlightTrigger`, dispatcher nad `twist()`/`twist_3d()` —
-mówi który typ zdarzenia (`MANEUVER` > `ALTITUDE_TWIST` >
-`DIRECTION_TWIST` > `TORSION_ANOMALY` > `NONE`) się odpalił i gdzie w
-torze. Uzupełnia `conflict_alert()`/`conflict_alert_fleet()` (które
-sprawdzają separację MIĘDZY torami), nie duplikuje ich - patrz
-docstring modułu. Wpięty do `demo.py`.
+## 1. Strumień (S-Layer)
+Strumień nie przechowuje wartości — tylko zmianę.
 
-![Błędy jednostek: kurs i prędkość pionowa](screenshot_flight_bugs.png)
+```
+class Strumien:
+    zmiana = 0
 
-### 🐛 Błąd 1: kurs liczony z surowych stopni lat/lon (bez korekty cos(lat))
+    def update(dane):
+        zmiana = dane - zmiana
 
-1 stopień długości geograficznej odpowiada ok. 111.32 km × cos(szerokość)
-na powierzchni Ziemi — czyli **maleje** wraz ze wzrostem szerokości
-geograficznej. Oryginalny kod liczył `arctan2` bezpośrednio na różnicach
-stopni `[lat, lon]`, traktując 1° lat i 1° lon jako tę samą odległość.
+    def gradient():
+        return zmiana
 
-Zweryfikowano na torze ze zgłoszenia (ok. 50°N): naiwny kurs z surowych
-stopni dawał **45.0°**, podczas gdy prawdziwy kurs (po korekcie
-`cos(lat)`) to **57.29°** — błąd 12.3°. Im bliżej biegunów, tym błąd
-większy; przy 70°N ten sam tor dawałby jeszcze większe zniekształcenie.
-Naprawiono przez rzutowanie `lat/lon` na lokalną płaszczyznę styczną w
-metrach (`_project_local_xy`) przed liczeniem kierunku ruchu.
+    def pulse():
+        return abs(zmiana)
+```
+To jest odpowiednik „procesora”, ale bez CPU.
 
-### 🐛 Błąd 2: zawijanie kąta w `twist()` (ten sam bug co w TIMDR-Radar-Module)
+## 2. Topologia (T-Layer)
+Topologia nie jest grafem danych — jest grafem przepływu.
 
-Kurs bliski 180°/-180° (lot na południe) powoduje, że `arctan2`
-przeskakuje między wartościami blisko +π i -π. Zweryfikowano: lot na
-południe z rzeczywistym wahnięciem kursu ~0.1-0.6° na krok dawał **4
-fałszywe alarmy „twist" na 5 punktów** przy naiwnym `np.gradient()` na
-kątach; **0 fałszywych alarmów** po zastosowaniu `np.unwrap()` przed
-różniczkowaniem. Test regresyjny:
-`test_lot_na_poludnie_bez_falszywego_twistu`.
+```
+class Topologia:
+    wezly = []
+    krawedzie = []
 
-### 🐛 Błąd 3: próg wysokości liczony na indeksie próbki, nie na czasie
+    def route(strumien):
+        return krawedzie[strumien]
 
-`np.gradient(alt)` bez przekazania `t` liczy surową różnicę wysokości
-**między próbkami**, nie prędkość pionową. Zweryfikowano: dla identycznej
-fizycznej dynamiki lotu (ta sama trasa wysokości) próbkowana co 10s i co
-30s, surowa różnica dawała **te same liczby** (200-300) niezależnie od
-odstępu czasowego, mimo że rzeczywista prędkość pionowa różniła się
-3-krotnie (20-30 m/s vs 6.7-10 m/s). Oznacza to, że próg `alt_thresh=50`
-oznaczał różne rzeczy w zależności od częstotliwości nadawania ADS-B/MLAT
-— bezużyteczne dla realnych, nierównomiernie próbkowanych danych.
-Naprawiono: `climb_rate = np.gradient(alt, t)`, próg teraz w m/s
-(domyślnie 15 m/s ≈ 2950 ft/min, jawnie udokumentowany jako wartość do
-dostrojenia per typ statku powietrznego, nie zwalidowana norma ATC).
+    def reshape():
+        reorganizuj_polaczenia(wezly, krawedzie)
+```
+To jest odpowiednik „kolejek”, ale bez kolejek.
 
-### 🐛 Błąd 4 (dziedziczony): `timdr_flow()` mieszał gradient po czasie z gradientem po indeksie
+## 3. Przepływ (F-Layer)
+Przepływ nie jest schedulerem — jest kierunkiem zmiany.
 
-Tak jak w `TIMDR-Radar-Module`: ostatni krok (`flow = np.gradient(v + a,
-axis=0)`) nie używał `t`, niespójnie z `v` i `a`. Dodatkowo w wersji
-lotniczej ten sam wektor `flow` mieszał stopnie (lat/lon, skala ~10⁻³) z
-metrami (alt, skala ~10⁰) — wartości fizycznie nieporównywalne w jednym
-wektorze. Naprawiono: `flow` liczony w spójnych jednostkach metrycznych
-(lokalna płaszczyzna styczna + wysokość), względem rzeczywistego `t`.
+```
+class Przeplyw:
+    def direction(zmiana):
+        if zmiana > 0: return "UP"
+        if zmiana < 0: return "DOWN"
+        return "STABLE"
 
-### Nowość: torsja 3D trajektorii (`frenet_serret` / `twist_3d`)
+    def velocity(zmiana):
+        return abs(zmiana)
 
-Krzywizna `kappa(t)` i torsja (skręcenie) `tau(t)` liczone standardowymi
-wzorami Freneta-Serreta (`kappa = |r'×r''|/|r'|³`, `tau = ((r'×r'')·r''')/|r'×r''|²`)
-z prawdziwej trajektorii 3D (wschód/północ/wysokość w metrach). `tau` to
-dokładnie ta sama wielkość matematyczna co "skręcenie" znane z klasycznej
-geometrii różniczkowej — nie jest to przybliżenie ani metafora zapożyczona
-z innej dziedziny.
+    def reorganize():
+        dostosuj_kierunki()
+```
+To jest odpowiednik „schedulerów”, ale bez schedulerów.
 
-**Zweryfikowane na znanej analitycznie helisie** (`test_frenet_serret_helisa_kappa_tau_dokladne`):
-błąd względny kappa i tau < 5% na czystych danych, przechodząc przez pełny
-pipeline geo-projekcji (lat/lon → lokalna płaszczyzna styczna), nie tylko
-na surowych współrzędnych.
+## 4. Stabilność (C-Layer)
+Stabilność nie jest kontrolą błędów — jest filtracją percepcji.
 
-**Uczciwie zmierzone ograniczenie**: tau wymaga trzeciej pochodnej
-pozycji (jerk). Surowe trzykrotne różnicowanie (`np.gradient` x3, tak jak
-reszta modułu liczy `flow`) wzmacnia szum pomiarowy GPS/ADS-B **10-40×**
-— przy szumie 0.5m odchylenie std. samego tau wyszło ok. **2.6** dla
-sygnału o prawdziwej wartości ~0.065, czyli praktycznie bezużyteczne.
-Naprawiono wygładzaniem Savitzky-Golay z oknem dobieranym **w sekundach**
-(nie w liczbie próbek — inaczej ta sama fizyczna dynamika dawałaby różne
-wyniki przy różnej częstotliwości próbkowania, dokładnie ten sam błąd co
-już poprawiony wcześniej w `twist()`). Nawet po wygładzeniu tau pozostaje
-najbardziej szumną wielkością w tym module — traktuj pojedyncze wartości
-jako orientacyjne.
+```
+class Stabilnosc:
+    def signal(zmiana):
+        return abs(zmiana) < prog
 
-`twist_3d()` flaguje punkty, gdzie tau mocno odstaje od własnej historii
-toru (próg adaptacyjny z rozstępu p10-p90, ten sam wzorzec co reszta
-ekosystemu TIMDR — zob. skill `timdr-signal-framework` §2). Sprawdzone na
-danych syntetycznych: łagodny, stały zakręt nie generuje żadnych
-alarmów; wstrzyknięty gwałtowny manewr (oscylacja pionowa nałożona na
-kontynuację zakrętu) zostaje wykryty, a flagi skupiają się w oknie
-manewru, nie rozrzucone losowo po całym locie.
+    def noise(zmiana):
+        return abs(zmiana) > prog
 
-**Czego NIE zweryfikowano**: to narzędzie nie było testowane na
-prawdziwych danych ADS-B/FDR, tylko na syntetycznych trajektoriach.
-Traktuj jako prototyp do dalszej walidacji na realnym ruchu lotniczym,
-nie jako gotowy detektor manewrów.
+    def coherence(strumien):
+        return strumien.gradient() < limit
+```
+To jest odpowiednik „kontroli błędów”, ale bez błędów.
 
-### Conflict alert (`conflict_alert`) — przewidywana separacja dwóch torów
+## 🔥 5. THE Hyperflow Loop — główna pętla percepcyjna
+Zamiast CPU → scheduler → proces → wątek → blokada → kolejka, masz:
+strumień → topologia → przepływ → stabilność
 
-Rozszerzenie inspirowane porównaniem z realnym STCA (Short-Term Conflict
-Alert) używanym w kontroli ruchu lotniczego. Bierze dwa tory, przewiduje
-ich ruch naprzód tym samym modelem kinematycznym co `predict()`
-(lokalnie stałe przyspieszenie), i sprawdza, czy w oknie czasowym istnieje
-moment, w którym separacja pozioma I pionowa jednocześnie spadają poniżej
-progu.
+```
+while True:
+    S.update(dane)
+    T.reshape()
+    F.reorganize()
+    C.coherence(S)
+```
+To jest pętla percepcyjna, nie obliczeniowa.
 
-Domyślne progi (**5 NM poziomo, 1000 ft pionowo**) to prawdziwe minima
-separacji ICAO dla kontrolowanej przestrzeni en-route (RVSM) — sprawdzone
-źródłowo, nie zmyślone. Domyślny horyzont 120s odpowiada typowemu
-horyzontowi patrzenia realnego STCA (dalej liniowa/kinematyczna predykcja
-przestaje być wiarygodna — to samo ograniczenie ma już `predict()`).
+## 🧬 6. THE — przepływ helikalny (opcjonalny moduł)
 
-**Realny błąd znaleziony i naprawiony własnym testem**: pierwsza wersja
-używała `_project_local_xy()` (tej samej co reszta modułu) do rzutowania
-obu torów na płaszczyznę metryczną — ale ta funkcja liczy origin
-względem **pierwszego punktu KAŻDEGO toru z osobna** (`lon[0]`/`lat[0]`).
-Dla dwóch różnych torów dawało to dwa różne, niewspółmierne układy
-współrzędnych — odejmowanie pozycji nie miało fizycznego sensu.
-Test na jednoznacznym scenariuszu (dwa samoloty lecące wprost na siebie)
-złapał to jako brak wykrytego konfliktu tam, gdzie oczywiście powinien
-wystąpić. Naprawiono: `_kinematic_state()` rzutuje oba tory na **jeden
-wspólny** punkt odniesienia (średnia lat/lon obu torów).
+```
+class HelikalnyPrzeplyw:
+    def cycle(zmiana):
+        return sin(zmiana)
 
-**Presety przestrzeni powietrznej** (`airspace="en_route"|"tma"|"final_approach"`,
-patrz `AIRSPACE_PRESETS`): wartości sprawdzone źródłowo (ICAO Doc 4444 /
-ECAC) — en-route 5 NM, TMA 3 NM, final approach 2.5 NM, wszystkie 1000 ft
-pionowo. Jawnie podane `horizontal_nm`/`vertical_ft` zawsze nadpisują
-preset. To rozsądne wartości domyślne do analizy/demo, NIE oficjalnie
-zatwierdzone minima dla konkretnej, realnej przestrzeni.
+    def linear(zmiana):
+        return zmiana
 
-**`conflict_alert_fleet(tracks, ...)`**: `conflict_alert()` uruchomione
-dla każdej pary torów naraz (skan O(n²), jak realny STCA sprawdza
-wszystkie pary w monitorowanej przestrzeni, nie jedną z góry wybraną
-parę). `tracks` to słownik `{etykieta: tor}` — wynik jednoznacznie
-wskazuje, która para koliduje. Posortowane po pilności
-(`time_to_conflict_s` rosnąco). Dla dużej liczby torów (setki+) O(n²)
-byłoby wolne bez indeksowania przestrzennego — dla garstki torów
-(prototyp/demo) nieistotne.
+    def combine():
+        return cycle(zmiana) + linear(zmiana)
+```
+To jest pipeline bez pipeline.
 
-**Uczciwe ograniczenia (to NIE jest certyfikowany system bezpieczeństwa
-ATC)**: brak modelowania planu lotu/przydzielonych poziomów/intencji
-pilota, zakłada że oba tory reprezentują z grubsza ten sam moment "teraz"
-(starszy tor jest doekstrapolowany do czasu nowszego tym samym modelem
-kinematycznym, co dokłada swój błąd), skan floty O(n²) bez optymalizacji
-przestrzennej.
+## 🚀 7. THE — minimalny system
 
-Wizualizacja: `demo_conflict_map.py` rysuje 3 gotowe przykłady (kurs
-kolizyjny/bezpieczna separacja pionowa/bezpieczny odstęp poziomy) na
-mapie i zapisuje `conflict_alert_przyklady.png`. Uruchamiane automatycznie
-przez `run.bat` (patrz niżej).
+```
+S = Strumien()
+T = Topologia()
+F = Przeplyw()
+C = Stabilnosc()
 
-## Porównanie z realnymi systemami i kierunki rozwoju
+while True:
+    S.update(input)
+    T.reshape()
+    F.reorganize()
+    C.coherence(S)
+```
+To jest pełny THE w 12 liniach pseudokodu.
 
-### Jak to wypada na tle FlightRadar24/FlightAware i STCA
+🧠 **Najprostsza definicja THE kodu**: cztery klasy (strumień, topologia,
+przepływ, stabilność) połączone w pętlę percepcyjną.
 
-**Pozyskiwanie danych (FlightRadar24/FlightAware)**: nieporównywalne
-wprost. Te systemy działają na ADS-B — pozycja z GPS transpondera,
-dokładność rzędu pojedynczych metrów, aktualizacja co kilka sekund przy
-gęstej sieci naziemnych stacji odbiorczych (FlightAware: ponad 1000
-stacji w 70+ krajach). TIMDR nie ma własnego źródła danych — to
-biblioteka analityczna, której trzeba dostarczyć tor jako gotową tablicę
-punktów; dokładność zależy całkowicie od tego, co się do niej wrzuci.
+---
 
-**Predykcja krótkoterminowa (`predict`)**: realnie porównywalna z
-najprostszą, najpowszechniejszą metodą używaną w STCA — filtrem liniowym
-(dead reckoning) z horyzontem patrzenia ~2 minuty. `predict()` jest
-odrobinę bardziej rozbudowany (lokalnie stałe przyspieszenie, nie tylko
-stała prędkość), ale ten sam rząd wielkości sofistykacji i to samo
-ograniczenie (zawodzi przy manewrze).
+## THE-GEO PRO → THE-GEO PRO 4D: historia walidacji
 
-**Wykrywanie konfliktów (`conflict_alert`/`conflict_alert_fleet`)**:
-robi tę samą kategorię zadania co STCA (przewidywana separacja par
-torów, progi ICAO, skan wszystkich par we "flocie"), tą samą
-fundamentalną metodą (liniowa/kinematyczna predykcja). To co odróżnia to
-od realnego STCA nie jest brakującą funkcją do dopisania, tylko
-brakującym kontekstem: STCA wie o planie lotu i zgodach kontrolera i
-dzięki temu wycisza alarmy dla w pełni bezpiecznych, zaplanowanych
-skrzyżowań kursów na różnych poziomach — TIMDR tego kontekstu nie ma i
-nie może mieć bez zewnętrznego źródła danych o planach lotu.
+Poniższe sekcje dotyczą jednej konkretnej, mierzalnej wielkości:
+geometrii trajektorii punktu w przestrzeni (kierunek, krzywizna, skręt).
+W przeciwieństwie do sekcji 1-7 wyżej, te wzory dają się sprawdzić —
+istnieje krzywa analityczna (helisa) o znanej, dokładnej krzywiźnie i
+skręcie, więc każdą proponowaną formułę można porównać z prawdziwą
+wartością.
 
-**Wygładzanie/estymacja stanu**: `trm_reduce()` to średnia krocząca
-3-punktowa. Realny STCA (i każdy poważny tracker) używa filtru Kalmana z
-propagacją niepewności (macierze P/Q/R). To zostaje największą
-architektoniczną luką — słabsza estymacja prędkości/przyspieszenia
-wpływa na WSZYSTKO w tym module (`predict`, `twist`, `conflict_alert`,
-`frenet_serret`), nie tylko na samo wygładzanie.
+### Oryginalny wzór (poniżej, sekcja "THE-GEO PRO") — sprawdzony i odrzucony
 
-**Torsja 3D (`frenet_serret`/`twist_3d`)**: tu TIMDR robi coś, czego
-komercyjne trackery w ogóle nie oferują (nie muszą — to nie ich zadanie),
-bo liczy prawdziwą wielkość różniczkowo-geometryczną z trajektorii, nie
-tylko wyświetla pozycję.
+Oryginalna `Torsion.compute` liczyła skręt z różnic **kierunków
+jednostkowych** `D_t2, D_t1, D_t` (patrz kod niżej). Sprawdzone na
+czystej, bezszumowej helisie analitycznej `x=r·cos(t), y=r·sin(t), z=c·t`
+(r=5, c=1, prawdziwe τ=0.038462):
 
-### Kierunki rozwoju
+| dt | τ (stary wzór) | błąd |
+|---|---|---|
+| 0.5 | 0.003507 | 90.9% |
+| 0.1 | 0.000724 | 98.1% |
+| 0.02 | 0.000145 | 99.6% |
+| 0.01 | 0.000073 | 99.8% |
+| 0.005 | 0.000036 | 99.9% |
 
-**Zalecane, dobry stosunek wysiłku do wartości:**
-- Prawdziwy filtr Kalmana (macierze P/Q/R, jak w realnym STCA) zamiast
-  `trm_reduce()`'s średniej 3-punktowej — poprawiłby jednocześnie
-  `predict()`, `twist()`, `conflict_alert()` i `frenet_serret()`, bo
-  wszystkie opierają się na tej samej estymacji prędkości/przyspieszenia.
-  Większy nakład niż dotychczasowe zmiany, ale architektonicznie
-  najbardziej wartościowy pojedynczy krok.
-- Indeksowanie przestrzenne (np. KD-drzewo) dla `conflict_alert_fleet()`
-  przy większej liczbie torów — ten sam problem O(n²) już raz
-  rozwiązany w `TIMDR-Radar-Module`, dałoby się przenieść wprost.
+Błąd **rośnie** w stronę 100% zamiast maleć do zera przy zagęszczaniu
+próbkowania — to znaczy, że wzór nie zbiega do prawdziwego skrętu, tylko
+do zera. Wzór jest błędny niezależnie od tego, jak gęste są dane.
 
-**Świadomie odradzane (wymagają danych/infrastruktury, których ten
-projekt nie ma i które zmieniłyby go w zupełnie inny rodzaj systemu):**
-- Integracja z planem lotu / zgodami kontrolera — wymaga zewnętrznego
-  źródła planów lotu, którego tu nie ma.
-- Strumieniowanie danych na żywo — wymaga infrastruktury odbiorczej
-  ADS-B (albo płatnego API), poza zakresem biblioteki analitycznej.
+### Poprawiony wzór — THE-GEO PRO 4D
 
-Krótko: TIMDR dobrze pokrywa najprostszą kategorię metod używanych w
-realnych systemach (liniowa predykcja + progi separacji + wygładzanie),
-i to pokrycie jest teraz szersze (cała flota, różne typy przestrzeni) niż
-na początku. Nie zbliżył się i nie powinien udawać, że się zbliża, do
-tego co czyni realne systemy bezpiecznymi operacyjnie: świadomości
-kontekstu (plan lotu, zgody) i jakości estymacji stanu (prawdziwy filtr).
+Zamiast różnic kierunków jednostkowych, poprawna wersja liczy krzywiznę
+i skręt z pochodnych **prędkości / przyspieszenia / szarpnięcia**
+(v, a, j — różnice skończone z 4 kolejnych punktów, gdzie t = parametr
+czasowy krzywej, stąd "4D" = x,y,z,t):
 
-Źródła użytych liczb: [Flightradar24 — ADS-B](https://www.flightradar24.com/blog/ads-b/),
-[Aerodata — porównanie trackerów](https://aerodata.ai/flightradar24-vs-flightaware-vs-ads-b-exchange-which-tracker-is-best/),
-[Short-term conflict alert — Wikipedia](https://en.wikipedia.org/wiki/Short-term_conflict_alert),
-[STCA — SKYbrary](https://skybrary.aero/articles/short-term-conflict-alert-stca),
-[Separation Standards — SKYbrary](https://skybrary.aero/articles/separation-standards),
-[EUROCONTROL — ECAC radar separation minima](https://www.eurocontrol.int/sites/default/files/publication/content/documents/nm/ecac_radar_sep_min.pdf).
+```
+v  = p_t  - p_t1
+v1 = p_t1 - p_t2
+a  = v - v1
+a1 = v1 - (p_t2 - p_t3)
+j  = a - a1
 
-### Uwaga o danych przykładowych
+speed = |v|
+if speed < min_speed:
+    return {gated: True, curvature: 0, torsion: 0, helical: 0}
 
-Diagnostyka (`diagnostics()`) na torze ze zgłoszenia pokazuje prędkość
-względem ziemi rosnącą do **~1000 węzłów** i wznoszenie **~4000-6000
-ft/min** — to fizycznie nierealne dla typowego lotu komercyjnego (przykład
-w zgłoszeniu ma przyspieszające, coraz większe skoki lat/lon). To nie
-błąd kodu, tylko efekt przykładowych danych — ale dobrze ilustruje, po co
-`diagnostics()` jest przydatne: pozwala od razu wychwycić fizycznie
-niewiarygodny tor (błąd sensora, zgubiona ramka ADS-B, sklejenie dwóch
-różnych lotów).
-
-## 🎯 Zastosowania (i warunki, przy których mają sens)
-
-**1. Monitoring toru lotu / wsparcie ATC (wykrywanie anomalii)**
-`twist()` jako flaga "coś nietypowego": gwałtowna zmiana kursu lub
-prędkości pionowej.
-*Warunki:* dane muszą mieć realny znacznik czasu (nie numer wiadomości);
-próg `climb_rate_thresh_mps` i `angle_thresh` trzeba dostroić do typu
-ruchu lotniczego (samolot pasażerski ≠ myśliwiec ≠ dron) — domyślne
-wartości to punkt startowy, nie norma. To narzędzie do przesiewania
-(flagowania do przeglądu przez człowieka), nie certyfikowany system
-detekcji anomalii ATC.
-
-**2. Analiza historycznych tras (post-flight, offline)**
-`trm_reduce()` + `diagnostics()` do oczyszczenia i podsumowania toru z
-logu ADS-B/FDR.
-*Warunki:* dane wsadowe (batch), nie strumień na żywo — `twist()` i
-`timdr_flow()` używają różnicy centralnej (`np.gradient`), czyli
-wykrycie zdarzenia w punkcie *i* korzysta też z punktu *i+1* (informacja
-z przyszłości względem *i*). Do przetwarzania na żywo nadaje się to
-tylko z jednopróbkowym opóźnieniem.
-
-**3. Wychwytywanie błędnych/niespójnych danych telemetrycznych**
-`diagnostics()` (prędkość względem ziemi w węzłach, prędkość pionowa w
-ft/min) jako szybki sanity-check — wartości fizycznie niemożliwe
-(>700kt dla samolotu pasażerskiego, >10000 ft/min) sygnalizują błąd
-danych, nie manewr.
-*Warunki:* przydatne tylko jeśli znasz z grubsza typ statku powietrznego
-(inne granice "sensowności" dla samolotu pasażerskiego, śmigłowca,
-drona).
-
-**4. Krótkoterminowa predykcja pozycji (`predict()`)**
-*Warunki:* ekstrapolacja kinematyczna z lokalnie stałym przyspieszeniem
-— wiarygodna na bardzo krótkim horyzoncie (sekundy-dziesiątki sekund) i
-tylko dla lotu bez manewru w tym oknie. Nie modeluje planu lotu, wiatru
-ani intencji pilota. Nie używać jako jedynego źródła do separacji ruchu
-lotniczego.
-
-### Ograniczenia geodezyjne (dotyczą wszystkich zastosowań)
-
-- Rzutowanie na lokalną płaszczyznę styczną (equirectangular) jest
-  dobrym przybliżeniem dla torów **regionalnych** (rzędu do kilkuset
-  km). Dla lotów długodystansowych/transoceanicznych błąd rośnie —
-  lepiej dzielić trasę na segmenty albo użyć właściwej biblioteki
-  geodezyjnej (np. `pyproj`).
-- Tor przecinający południk 180° (antimeridian) **nie jest obsługiwany**
-  — `_validate()` rzuci wyjątek zamiast cicho zwrócić błędny wynik.
-- `predict()` i `trm_reduce()` operują na lat/lon w stopniach — dla nich
-  poprawka `cos(lat)` matematycznie nie zmienia wyniku w stopniach
-  (skalowanie liniowe znosi się przy odwrotnym rzutowaniu), więc nie
-  oczekuj innych wartości niż w wersji bez poprawki. Poprawka ma
-  znaczenie tam, gdzie liczony jest **kierunek/kąt** (`twist()`,
-  `diagnostics()`) — tam faktycznie zmienia wynik.
-
-### Przykład użycia (identyczny jak w zgłoszeniu, plus diagnostics)
-
-```python
-from timdr_flight import TIMDRFlight
-
-timdr = TIMDRFlight()
-track = [
-    [50.0, 19.9, 1000, 0],
-    [50.01, 19.91, 1200, 10],
-    [50.03, 19.93, 1500, 20],
-    [50.06, 19.96, 1800, 30],
-    [50.10, 20.00, 2000, 40],
-]
-
-flow = timdr.timdr_flow(track)
-twist = timdr.twist(track)
-stable = timdr.trm_reduce(track)
-pred = timdr.predict(track)
-diag = timdr.diagnostics(track)
+kappa = |v x a| / |v|^3
+tau   = det(v, a, j) / |v x a|^2
+H     = sqrt(kappa^2 + tau^2)
 ```
 
-Uruchomienie: `python demo.py` (podstawowe demo tekstowe) albo
-`run.bat` (Windows — instaluje zależności, uruchamia testy, generuje i
-otwiera mapę z 3 przykładami `conflict_alert()`). Testy: `pytest -q`.
+Sprawdzone na tej samej helisie (r=5, c=1, κ=0.192308, τ=0.038462):
+
+| dt | κ | błąd κ | τ | błąd τ |
+|---|---|---|---|---|
+| 0.5 | 0.186416 | 3.06% | 0.039977 | 3.94% |
+| 0.1 | 0.192070 | 0.12% | 0.038521 | 0.15% |
+| 0.02 | 0.192298 | 0.0049% | 0.038464 | 0.0062% |
+| 0.01 | 0.192305 | 0.0012% | 0.038462 | 0.0015% |
+| 0.005 | 0.192307 | 0.0003% | 0.038462 | 0.0004% |
+
+Błąd maleje monotonicznie do ~0 — wzór faktycznie zbiega do prawdziwej
+krzywizny i skrętu.
+
+**Implementacja**: [`the_geo_pro_4d.py`](the_geo_pro_4d.py) —
+prawdziwy, uruchamialny kod Python (nie pseudokod).
+
+### Druga poprawka: bramkowanie oparte na cross_norm==0 nie wystarcza
+
+Wersja pseudokodu nadesłana później pod nazwą `THE_GEO_PRO_4D_Radar`
+zabezpieczała dzielenie przez `if cross_norm == 0`. To chroni tylko
+przed dosłownym zerem/NaN — **nie** chroni przed wzmocnieniem szumu, gdy
+trajektoria jest niemal (ale nie dokładnie) prosta:
+
+```
+v = (1, 0, 0);  a = (1, 1e-6, 0)   # typowy szum kierunku na "prostym" odcinku
+cross_norm = 1e-6   # != 0, więc stary warunek przepuszcza dalej
+tau = dot(cross_va, j) / cross_norm**2  →  rzędu 1e6 zamiast ~0
+```
+
+Ten sam wzorzec błędu co przy `min_speed`/`min_step_m` (dzielenie przez
+małą wartość wzmacnia szum), tylko na innym mianowniku. Poprawka:
+bramkowanie torsji na podstawie krzywizny `kappa` (już obliczonej,
+fizycznie sensownej wielkości), nie na `cross_norm` wprost —
+`if kappa < min_curvature: tau = 0`. Domyślne `min_curvature=1e-4` to
+punkt startowy, nie zwalidowana stała — jak `min_step_m` czy
+`min_speed`, wymaga kalibracji na realnych zaszumionych danych 3D, gdy
+się pojawią.
+
+**Testy**: [`tests/test_the_geo_pro_4d.py`](tests/test_the_geo_pro_4d.py)
+— 8 testów: zbieżność do wartości analitycznej, brak dzielenia przez
+zero na linii prostej, bramkowanie `min_speed`, regresja na wzmacnianie
+szumu przy niemal-prostej trajektorii (opisana wyżej), niezmienniczość
+na obrót 3D wokół dowolnej osi (wzór Rodriguesa). Wszystkie przechodzą:
+
+```
+$ python3 -m unittest discover -s tests -v
+...
+Ran 10 tests in 0.003s
+OK
+```
+
+### Trzecia poprawka: `THE_GEO_PRO_4D_Radar.py` było drugą, niezależną kopią tego samego wzoru
+
+Znalezione przy pełnej ponownej inspekcji repo: `THE_GEO_PRO_4D_Radar.py`
+miało WŁASNĄ implementację — treściowo identyczną z `the_geo_pro_4d.py`
+(ta sama poprawka bramkowania na `kappa` z sekcji wyżej), ale jako
+osobna kopia kodu, nie import ze wspólnego źródła. To dokładnie ten
+mechanizm, który już raz spowodował błąd opisany w "Druga poprawka" wyżej
+— dwie kopie tej samej logiki, jedna naprawiona niezależnie od drugiej.
+Poprawka: `THE_GEO_PRO_4D_Radar.py` jest teraz cienkim re-eksportem
+(`from the_geo_pro_4d import THE_GEO_PRO_4D as THE_GEO_PRO_4D_Radar`),
+nie osobną implementacją — nie da się już, żeby te dwie nazwy cicho się
+rozjechały. Test regresyjny na tożsamość obiektu funkcji (nie tylko
+"daje ten sam wynik teraz"):
+[`tests/test_the_geo_pro_4d_radar.py`](tests/test_the_geo_pro_4d_radar.py).
+
+### Czwarta poprawka: wzmacnianie szumu przy potrójnym różniczkowaniu na realnych/krótkich sekwencjach
+
+Znalezione przy audycie ekosystemu TIMDR pod kątem powtarzalnego wzorca
+błędu ("Pattern A"): `THE_GEO_PRO_4D()` liczy `v/a/j` z **surowych,
+kolejnych** punktów. Na gładkiej, gęsto próbkowanej krzywej analitycznej
+(jak w testach zbieżności wyżej) to zbiega poprawnie. Ale repo siostrzane
+`FLIGHT-TRACKING-TIMDR`, używające matematycznie identycznego wzoru,
+zmierzyło bezpośrednio na zaszumionych danych GPS: surowe różnicowanie
+wzmacnia szum pomiaru 10-40× (`std(tau)≈2.6` przy prawdziwym `tau≈0.065`).
+Niezależnie, `GIA-TIMDR` potwierdziło ten sam mechanizm na krótkich
+(~25-punktowych) realnych szeregach czasowych — krzywizna/torsja z
+surowych różnic stają się nierozróżnialne od szumu.
+
+**Poprawka**: nowa funkcja `THE_GEO_PRO_4D_sequence(points, smooth=True)`
+— dla sekwencji dłuższych niż 4 punkty liczy `v/a/j` **bezpośrednio z
+pochodnych lokalnie dopasowanego wielomianu** (prawdziwy filtr
+różniczkujący Savitzky-Golay, bez zależności od scipy — własna
+eliminacja Gaussa dla równań normalnych najmniejszych kwadratów), nie
+"wygładź pozycje, potem policz proste różnice sąsiadów". **Ta pierwsza,
+prostsza wersja została wypróbowana i odrzucona** — dawała WIĘKSZY błąd
+niż brak wygładzania w ogóle, bo odejmowanie dwóch niezależnie
+dopasowanych, zachodzących na siebie okien nie tłumi szumu wyższych
+pochodnych tak, jak wzięcie pochodnej analitycznie z jednego dopasowania
+na punkt. Zmierzone na zaszumionej helisie: średni błąd `tau` spada
+zauważalnie (test `test_smoothed_sequence_has_lower_tau_error_than_raw`)
+względem surowego różnicowania. `THE_GEO_PRO_4D()` (4-punktowa) pozostaje
+niezmieniona — `smooth=False` w nowej funkcji odtwarza jej stare
+zachowanie dokładnie, dla wstecznej kompatybilności.
+
+**Testy**: [`tests/test_noise_amplification_fix.py`](tests/test_noise_amplification_fix.py)
+— 4 nowe testy (redukcja błędu na zaszumionej helisie, brak regresji na
+czystych danych, dokładna zgodność `smooth=False` ze starym
+zachowaniem, czytelny błąd zamiast `IndexError` przy `polyorder<3`).
+
+### Zastosowania (już zbudowane i zwalidowane w osobnych repo)
+
+- **[RADAR-TRACKING-TIMDR](https://github.com/jbackk-lang/RADAR-TRACKING-TIMDR)**
+  — wariant 2D (bez skrętu, tylko krzywizna) sprawdzony na prawdziwych
+  danych GPS z 4 przejazdów: korelacja z realnymi manewrami 0.47-0.76
+  (przy bramkowaniu `min_step_m=3.0`) vs -0.08..-0.00 bez bramkowania.
+- **[FLIGHT-TRACKING-TIMDR](https://github.com/jbackk-lang/FLIGHT-TRACKING-TIMDR)**
+  — pełny wariant 3D (ten opisany wyżej) użyty do śledzenia lotu na
+  danych syntetycznych; `the_geo_pro_4d.py` w tym repo jest matematycznie
+  identyczny z `core/curvature_detector_3d.py` w FLIGHT-TRACKING-TIMDR
+  (ponownie zweryfikowane numerycznie przy tej inspekcji — 200 losowych
+  zestawów punktów, max różnica |Δkappa|≈4e-17, |Δtau|≈3e-16, czyli
+  szum zaokrągleń zmiennoprzecinkowych, nie realna różnica), różni się
+  tylko interfejsem (dict zamiast dataclass, dodatkowo liczy `H`).
+
+---
+
+## THE-GEO PRO (oryginalny pseudokod, zachowany dla kontekstu)
+
+Poniższe klasy to oryginalny pseudokod tego repo. `Torsion.compute` jest
+**błędny** — patrz sekcja wyżej. Zachowany tu bez zmian dla
+przejrzystości historii, nie do użycia.
+
+### 1. Delta geometryczna (pełna różniczka)
+```
+class DeltaGeo:
+    def compute(p_t, p_t1):
+        dx = p_t.x - p_t1.x
+        dy = p_t.y - p_t1.y
+        dz = p_t.z - p_t1.z
+        return (dx, dy, dz)
+```
+
+### 2. Gradient + kierunek
+```
+class GradientDir:
+    def gradient(dx, dy, dz):
+        return sqrt(dx*dx + dy*dy + dz*dz)
+
+    def direction(dx, dy, dz, G):
+        if G == 0: return (0,0,0)
+        return (dx/G, dy/G, dz/G)
+```
+
+### 3. Krzywizna (curvature)
+```
+class Curvature:
+    def compute(D_t, D_t1, G):
+        diff = norm(D_t - D_t1)
+        return diff / G
+```
+
+### 4. Skręt (torsion) — ⚠️ BŁĘDNY, patrz walidacja wyżej
+```
+class Torsion:
+    def compute(D_t2, D_t1, D_t, G):
+        cross_vec = cross(D_t2, D_t1)
+        return dot(cross_vec, D_t) / (G*G)
+```
+
+### 5. Helikalność (spiralność)
+```
+class Helical:
+    def compute(kappa, tau):
+        return sqrt(kappa*kappa + tau*tau)
+```
+
+### 6. Przepływ geometryczny PRO
+```
+class FlowGeo:
+    def compute(D, G, kappa, tau):
+        return {
+            "dir": D,
+            "vel": G,
+            "curv": kappa,
+            "tors": tau
+        }
+```
+
+### 7. Stabilność geometryczna PRO
+```
+class StabilityGeo:
+    def dir_stab(D_t, D_t1):
+        return dot(D_t, D_t1)
+
+    def curv_stab(kappa):
+        return 1 / (1 + kappa)
+
+    def tors_stab(tau):
+        return 1 / (1 + abs(tau))
+
+    def helix_stab(H):
+        return 1 / (1 + H)
+
+    def total(Dstab, Ck, Ct, Ch):
+        return Dstab * Ck * Ct * Ch
+```
+
+### 8. THE-GEO PRO — główna pętla percepcyjna (oryginalna, z błędnym skrętem)
+```
+def THE_GEO_PRO(p_t, p_t1, p_t2):
+    dx, dy, dz = DeltaGeo.compute(p_t, p_t1)
+    G = GradientDir.gradient(dx, dy, dz)
+    D_t = GradientDir.direction(dx, dy, dz, G)
+
+    dx1, dy1, dz1 = DeltaGeo.compute(p_t1, p_t2)
+    G1 = GradientDir.gradient(dx1, dy1, dz1)
+    D_t1 = GradientDir.direction(dx1, dy1, dz1, G1)
+
+    kappa = Curvature.compute(D_t, D_t1, G)
+
+    dx2, dy2, dz2 = DeltaGeo.compute(p_t2, p_t1)
+    G2 = GradientDir.gradient(dx2, dy2, dz2)
+    D_t2 = GradientDir.direction(dx2, dy2, dz2, G2)
+
+    tau = Torsion.compute(D_t2, D_t1, D_t, G)   # <- błędny wzór, patrz wyżej
+
+    H = Helical.compute(kappa, tau)
+    F = FlowGeo.compute(D_t, G, kappa, tau)
+
+    Dstab = StabilityGeo.dir_stab(D_t, D_t1)
+    Ck = StabilityGeo.curv_stab(kappa)
+    Ct = StabilityGeo.tors_stab(tau)
+    Ch = StabilityGeo.helix_stab(H)
+    C = StabilityGeo.total(Dstab, Ck, Ct, Ch)
+
+    return {
+        "delta": (dx, dy, dz),
+        "gradient": G,
+        "direction": D_t,
+        "curvature": kappa,
+        "torsion": tau,
+        "helical": H,
+        "flow": F,
+        "stability": C
+    }
+```
+
+**Użyj zamiast tego [`the_geo_pro_4d.py`](the_geo_pro_4d.py)** — poprawny,
+przetestowany, zwalidowany na helisie analitycznej.
