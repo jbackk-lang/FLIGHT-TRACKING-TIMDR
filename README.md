@@ -9,9 +9,10 @@ pod dane `[lat, lon, alt, t]`.
 
 Kod ze zgłoszenia uruchomiony i przetestowany (`test_timdr_flight.py` +
 `test_frenet_serret.py` + `test_conflict_alert.py` +
-`test_conflict_fleet_airspace.py` + `test_timdr_flight_trigger.py`,
-34/34 testów przechodzi). Znalezione i naprawione: dwa błędy dziedziczone
-z `TIMDR-Radar-Module` (zawijanie kąta, gradient po indeksie zamiast po
+`test_conflict_fleet_airspace.py` + `test_timdr_flight_trigger.py` +
+`test_twist_3d_masking_and_window_limits.py`, wszystkie testy
+przechodzą). Znalezione i naprawione: dwa błędy dziedziczone z
+`TIMDR-Radar-Module` (zawijanie kąta, gradient po indeksie zamiast po
 czasie) oraz dwa nowe błędy specyficzne dla danych geograficznych.
 Dodano też torsję 3D (`frenet_serret`/`twist_3d`) — patrz sekcja niżej.
 Zależności: `numpy`, `scipy` (Savitzky-Golay w `frenet_serret`).
@@ -111,6 +112,51 @@ manewru, nie rozrzucone losowo po całym locie.
 prawdziwych danych ADS-B/FDR, tylko na syntetycznych trajektoriach.
 Traktuj jako prototyp do dalszej walidacji na realnym ruchu lotniczym,
 nie jako gotowy detektor manewrów.
+
+#### Naprawa: maskowanie progu w `twist_3d()` (Pattern B)
+
+Znalezione przy audycie całego ekosystemu TIMDR pod kątem progów
+liczonych z tej samej (potencjalnie małej) próbki, którą się testuje —
+patrz `GIA-TIMDR/docs/geometry/TIMDR_Trefoil_MissingCoordinateSolver.md`
+dla pełnego opisu mechanizmu maskowania. Stary kod liczył
+medianę/p10/p90 z CAŁEGO `tau`, włącznie z testowanym punktem — duży,
+realny outlier mógł zawyżać własny próg wykrywania. Naprawiono:
+`twist_3d(robust_loo=True)` (domyślne) liczy próg dla każdego punktu z
+pominięciem tego punktu (leave-one-out); `robust_loo=False` odtwarza
+stare zachowanie.
+
+**Uczciwy wynik pomiaru tej naprawy**: na torze typowej długości
+(~170 punktów) z manewrem zajmującym ~7% toru, wykrywalność była już
+solidna w SZEROKIM zakresie amplitud (50-1600) NIEZALEŻNIE od
+`robust_loo` — maskowanie NIE jest tu dominującym problemem przy
+typowym rozmiarze próbki (w przeciwieństwie do wcześniej znalezionego
+przypadku N~25 w GIA-TIMDR, gdzie mean±std na małej próbce dawało
+recall bliski przypadkowi). Naprawa jest tanim, bezpiecznym
+usprawnieniem (nie psuje istniejącej wykrywalności — test
+`test_detection_robust_across_amplitude_range_on_typical_length_track`),
+ale nie jest tym, co dominuje realne ograniczenia tego narzędzia —
+patrz niżej.
+
+#### Uczciwe ograniczenie: okno wygładzania a krótkie manewry
+
+Przy testowaniu naprawy maskowania znaleziono WAŻNIEJSZE ograniczenie:
+na BARDZO KRÓTKICH torach (~15-25 punktów) z KRÓTKIMI manewrami
+(1-3 punkty), `twist_3d()` daje CAŁKOWITY brak detekcji NIEZALEŻNIE OD
+AMPLITUDY (sprawdzone do +3200m — dziesiątki razy większej niż
+amplitudy, które są wykrywane na dłuższych torach). Przyczyna: okno
+wygładzania (`window_seconds`), potrzebne żeby zwalczyć wzmacnianie
+szumu (patrz sekcja wyżej), musi być szersze niż pojedynczy punkt, żeby
+dać stabilną pochodną 3. rzędu — ale gdy jest SZERSZE niż sam manewr,
+wygładza go razem z sąsiednim, spokojnym lotem, znosząc dokładnie ten
+sygnał, który ma wykryć. To jest bezpośredni kompromis wynikający z
+naprawy wzmacniania szumu (patrz też analogiczna naprawa w
+`THE_TIMDR_Hyperflow_Engine`) — im lepiej tłumisz szum wygładzaniem, tym
+łatwiej przypadkiem stłumić też krótkotrwałą, realną anomalię. NIE
+naprawione tutaj (wymagałoby adaptacyjnego doboru okna do nieznanej z
+góry długości manewru) — udokumentowane i pokryte testem
+(`test_short_maneuver_on_short_track_undetected_regardless_of_amplitude`
+w `test_twist_3d_masking_and_window_limits.py`), żeby przyszła zmiana
+nie zepsuła cicho tej wiedzy.
 
 ### Conflict alert (`conflict_alert`) — przewidywana separacja dwóch torów
 

@@ -301,7 +301,7 @@ class TIMDRFlight:
         return kappa, tau
 
     # --- 6. Twist 3D: anomalia skręcenia (torsji) trajektorii ---
-    def twist_3d(self, track, tau_factor=3.0, floor_frac=0.05, window_seconds=4.0):
+    def twist_3d(self, track, tau_factor=3.0, floor_frac=0.05, window_seconds=4.0, robust_loo=True):
         """
         Flaguje punkty, w których torsja tau(t) (patrz frenet_serret) mocno
         odstaje od typowego zakresu DLA TEGO SAMEGO TORU - próg adaptacyjny
@@ -312,25 +312,71 @@ class TIMDRFlight:
         liczony jest z własnej historii toru, z podłogą (floor_frac) na
         wypadek lotu prostoliniowego, gdzie tau~0 dla wszystkich punktów.
 
+        NAPRAWIONE (Pattern B - maskowanie przez małą próbkę, znalezione
+        przy audycie ekosystemu TIMDR pod kątem progów liczonych z tej
+        samej próbki, którą się testuje - patrz GIA-TIMDR/docs/geometry/
+        TIMDR_Trefoil_MissingCoordinateSolver.md dla pełnego opisu
+        mechanizmu): stary kod liczył medianę/p10/p90 z CAŁEGO `tau`
+        WŁĄCZNIE z testowanym punktem - duży, realny outlier mógł
+        zawyżać własny próg wykrywania. `robust_loo=True` (domyślne)
+        liczy próg dla KAŻDEGO punktu z pominięciem tego punktu
+        (leave-one-out) - dokładny outlier nie może już zawyżyć progu,
+        którym sam jest sprawdzany. `robust_loo=False` przywraca stare
+        zachowanie (wsteczna kompatybilność/porównania).
+
+        UCZCIWE OGRANICZENIE (znalezione przy testowaniu tej naprawy,
+        WAŻNIEJSZE niż samo maskowanie dla krótkich torów): na testowym
+        torze o normalnej długości (~170 punktów) z manewrem zajmującym
+        ~7% toru, wykrywalność była już solidna w SZEROKIM zakresie
+        amplitud (50-1600) NIEZALEŻNIE od robust_loo - maskowanie nie
+        jest tu dominującym problemem przy typowych rozmiarach próbki.
+        Dominującym problemem dla BARDZO KRÓTKICH torów (rzędu 15-25
+        punktów) z KRÓTKIMI manewrami (1-3 punkty) jest CAŁKOWITA
+        nieczułość NIEZALEŻNIE OD AMPLITUDY (nawet do +3200m) - torsja
+        wychodzi ~0 dla każdej amplitudy. Przyczyna: okno wygładzania
+        (window_seconds, patrz frenet_serret) musi być szersze niż
+        pojedynczy punkt, żeby dać stabilną pochodną 3. rzędu - ale gdy
+        jest SZERSZE niż sam manewr, wygładza go razem z sąsiednim,
+        spokojnym lotem, znosząc sygnał, który ma wykryć. To NIE jest
+        naprawione tutaj (wymagałoby adaptacyjnego doboru okna do
+        długości manewru, którego się jeszcze nie zna) - patrz README,
+        sekcja "Ograniczenie: okno wygładzania a krótkie manewry".
+
         Zwraca indeksy punktów, w których |tau - mediana(tau)| przekracza
         próg. To NIE jest zwalidowane na prawdziwych danych ADS-B - patrz
         README, sekcja "Status torsji 3D", dla uczciwego opisu co zostało
         i nie zostało sprawdzone.
         """
         kappa, tau = self.frenet_serret(track, window_seconds=window_seconds)
-        if len(tau) < 3:
+        n = len(tau)
+        if n < 3:
             return np.array([], dtype=int)
 
-        med = np.median(tau)
-        p10, p90 = np.percentile(tau, 10), np.percentile(tau, 90)
-        spread = p90 - p10
-        floor = max(abs(med) * floor_frac, 1e-6)
-        if spread <= 0 or not np.isfinite(spread):
-            spread = floor
-        spread = max(spread, floor)
+        if not robust_loo:
+            med = np.median(tau)
+            p10, p90 = np.percentile(tau, 10), np.percentile(tau, 90)
+            spread = p90 - p10
+            floor = max(abs(med) * floor_frac, 1e-6)
+            if spread <= 0 or not np.isfinite(spread):
+                spread = floor
+            spread = max(spread, floor)
+            thr = tau_factor * spread
+            return np.where(np.abs(tau - med) > thr)[0]
 
-        thr = tau_factor * spread
-        return np.where(np.abs(tau - med) > thr)[0]
+        flagged = []
+        for i in range(n):
+            others = np.delete(tau, i)
+            med = np.median(others)
+            p10, p90 = np.percentile(others, 10), np.percentile(others, 90)
+            spread = p90 - p10
+            floor = max(abs(med) * floor_frac, 1e-6)
+            if spread <= 0 or not np.isfinite(spread):
+                spread = floor
+            spread = max(spread, floor)
+            thr = tau_factor * spread
+            if abs(tau[i] - med) > thr:
+                flagged.append(i)
+        return np.array(flagged, dtype=int)
 
     # --- 7. Conflict alert: przewidywana separacja między dwoma torami ---
     NM_TO_M = 1852.0
