@@ -9,12 +9,20 @@ pod dane `[lat, lon, alt, t]`.
 
 Kod ze zgłoszenia uruchomiony i przetestowany (`test_timdr_flight.py` +
 `test_frenet_serret.py` + `test_conflict_alert.py` +
-`test_conflict_fleet_airspace.py`, 27/27 testów przechodzi). Znalezione i
-naprawione: dwa błędy dziedziczone z `TIMDR-Radar-Module` (zawijanie
-kąta, gradient po indeksie zamiast po czasie) oraz dwa nowe błędy
-specyficzne dla danych geograficznych. Dodano też torsję 3D
-(`frenet_serret`/`twist_3d`) — patrz sekcja niżej. Zależności: `numpy`,
-`scipy` (Savitzky-Golay w `frenet_serret`).
+`test_conflict_fleet_airspace.py` + `test_timdr_flight_trigger.py`,
+34/34 testów przechodzi). Znalezione i naprawione: dwa błędy dziedziczone
+z `TIMDR-Radar-Module` (zawijanie kąta, gradient po indeksie zamiast po
+czasie) oraz dwa nowe błędy specyficzne dla danych geograficznych.
+Dodano też torsję 3D (`frenet_serret`/`twist_3d`) — patrz sekcja niżej.
+Zależności: `numpy`, `scipy` (Savitzky-Golay w `frenet_serret`).
+
+**`timdr_flight_trigger.py`** — czujnik integralności JEDNEGO toru (NIE
+model): `TIMDRFlightTrigger`, dispatcher nad `twist()`/`twist_3d()` —
+mówi który typ zdarzenia (`MANEUVER` > `ALTITUDE_TWIST` >
+`DIRECTION_TWIST` > `TORSION_ANOMALY` > `NONE`) się odpalił i gdzie w
+torze. Uzupełnia `conflict_alert()`/`conflict_alert_fleet()` (które
+sprawdzają separację MIĘDZY torami), nie duplikuje ich - patrz
+docstring modułu. Wpięty do `demo.py`.
 
 ![Błędy jednostek: kurs i prędkość pionowa](screenshot_flight_bugs.png)
 
